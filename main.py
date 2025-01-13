@@ -1,154 +1,222 @@
 import os
-#os.environ["OPENAI_API_KEY"] = "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"
-# Run with streamlit : streamlit run main.py
 from typing import List, Dict, Any
-import PyPDF2
-import docx
-import pptx
-from langchain_community.document_loaders import (
-    PyPDFLoader,
-    Docx2txtLoader,
-    UnstructuredPowerPointLoader,
-)
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
-from langchain_openai import ChatOpenAI
-from langchain.chains import ConversationalRetrievalChain
 import streamlit as st
-import json
-from datetime import datetime
+from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, UnstructuredPowerPointLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+from langchain_community.vectorstores import Chroma
+from langchain.chains import ConversationalRetrievalChain
+import google.generativeai as genai
+
+# Set your Google API key
+os.environ["GOOGLE_API_KEY"] = "AIzaSyCKhfAvlwzxF0DONzqGWbs6goMvn8iEkwE"
+
+# Configure Gemini
+genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
 
 
-class DocumentProcessor:
-    def __init__(self, base_folder: str):
-        self.base_folder = base_folder
+class DocumentManager:
+    def __init__(self, folder_path: str):
+        self.folder_path = folder_path
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200,
             length_function=len
         )
-        self.metadata_store = {}
-
-    def extract_metadata(self, filepath: str) -> Dict[str, Any]:
-        """Extract metadata from document files"""
-        filename = os.path.basename(filepath)
-        file_ext = os.path.splitext(filename)[1].lower()
-        created_time = os.path.getctime(filepath)
-
-        metadata = {
-            "filename": filename,
-            "filepath": filepath,
-            "file_type": file_ext,
-            "created_date": datetime.fromtimestamp(created_time).strftime('%Y-%m-%d %H:%M:%S'),
-            "size_kb": os.path.getsize(filepath) / 1024
-        }
-
-        return metadata
-
-    def process_document(self, filepath: str) -> List[str]:
-        """Process different document types and extract text"""
-        file_ext = os.path.splitext(filepath)[1].lower()
-
-        try:
-            if file_ext == '.pdf':
-                loader = PyPDFLoader(filepath)
-            elif file_ext == '.docx':
-                loader = Docx2txtLoader(filepath)
-            elif file_ext in ['.pptx', '.ppt']:
-                loader = UnstructuredPowerPointLoader(filepath)
-            else:
-                return []
-
-            documents = loader.load()
-            texts = self.text_splitter.split_documents(documents)
-
-            # Store metadata
-            metadata = self.extract_metadata(filepath)
-            self.metadata_store[filepath] = metadata
-
-            return texts
-        except Exception as e:
-            print(f"Error processing {filepath}: {str(e)}")
-            return []
-
-    def scan_directory(self) -> List[str]:
-        """Recursively scan directory and process all documents"""
-        all_texts = []
-
-        for root, _, files in os.walk(self.base_folder):
-            for file in files:
-                filepath = os.path.join(root, file)
-                if file.endswith(('.pdf', '.docx', '.pptx', '.ppt')):
-                    texts = self.process_document(filepath)
-                    all_texts.extend(texts)
-
-        return all_texts
-
-
-class AIQueryEngine:
-    def __init__(self, texts: List[str]):
-        self.embeddings = OpenAIEmbeddings()
-        self.vectorstore = Chroma.from_documents(texts, self.embeddings)
-        self.chat_model = ChatOpenAI(temperature=0.7)
-        self.qa_chain = ConversationalRetrievalChain.from_llm(
-            self.chat_model,
-            self.vectorstore.as_retriever(),
-            return_source_documents=True
-        )
+        self.processed_files = []
+        self.qa_chain = None
         self.chat_history = []
 
-    def query(self, question: str) -> Dict[str, Any]:
-        """Process a query and return relevant information"""
-        result = self.qa_chain({"question": question, "chat_history": self.chat_history})
+    def process_file(self, file_path: str) -> List[str]:
+        """Process a single file and return its chunks"""
+        print(f"\nAttempting to process: {file_path}")
+        try:
+            if file_path.endswith('.pdf'):
+                print("Processing as PDF...")
+                loader = PyPDFLoader(file_path)
+            elif file_path.endswith('.docx'):
+                print("Processing as DOCX...")
+                loader = Docx2txtLoader(file_path)
+            elif file_path.endswith(('.pptx', '.ppt')):
+                print("Processing as PowerPoint...")
+                loader = UnstructuredPowerPointLoader(file_path)
+            else:
+                print(f"Unsupported file type: {file_path}")
+                return []
 
-        # Update chat history
-        self.chat_history.append((question, result["answer"]))
+            print("Loading document...")
+            documents = loader.load()
+            print(f"Document loaded, splitting into chunks...")
+            chunks = self.text_splitter.split_documents(documents)
+            print(f"Created {len(chunks)} chunks")
+            self.processed_files.append(file_path)
+            print(f"Successfully processed {file_path}")
+            return chunks
 
-        # Get source documents
-        sources = [doc.metadata for doc in result["source_documents"]]
+        except Exception as e:
+            print(f"Error processing {file_path}: {str(e)}")
+            print(f"Error type: {type(e)}")
+            return []
 
-        return {
-            "answer": result["answer"],
-            "sources": sources
-        }
+    def setup_qa_system(self):
+        """Initialize the QA system with processed documents"""
+        print("\nSetting up QA system...")
+        print(f"Looking for files in: {self.folder_path}")
+        print("Files found:")
+        for root, _, files in os.walk(self.folder_path):
+            for file in files:
+                print(f"- {file}")
+
+        try:
+            all_chunks = []
+            for root, _, files in os.walk(self.folder_path):
+                for file in files:
+                    if file.endswith(('.pdf', '.docx', '.pptx', '.ppt')):
+                        file_path = os.path.join(root, file)
+                        chunks = self.process_file(file_path)
+                        all_chunks.extend(chunks)
+
+            print(f"\nTotal files processed: {len(self.processed_files)}")
+
+            if not all_chunks:
+                print("No documents were successfully processed!")
+                return False
+
+            print("Initializing embeddings...")
+            embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+
+            # Create a persistent directory for Chroma
+            persist_directory = os.path.join(os.path.dirname(self.folder_path), 'chroma_db')
+            os.makedirs(persist_directory, exist_ok=True)
+
+            print("Creating vector store...")
+            vectorstore = Chroma.from_documents(
+                documents=all_chunks,
+                embedding=embeddings,
+                persist_directory=persist_directory
+            )
+
+            print("Setting up QA chain...")
+            self.qa_chain = ConversationalRetrievalChain.from_llm(
+                ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.7),
+                vectorstore.as_retriever(),
+                return_source_documents=True
+            )
+            print("QA system setup complete!")
+            return True
+
+        except Exception as e:
+            print(f"Error setting up QA system: {str(e)}")
+            print(f"Error type: {type(e)}")
+            return False
+
+    def ask_question(self, question: str) -> Dict:
+        """Ask a question and get a response with source information"""
+        if not self.qa_chain:
+            return {"error": "QA system not initialized. Run setup_qa_system() first."}
+
+        try:
+            # Using the new invoke method instead of calling directly
+            result = self.qa_chain.invoke({
+                "question": question,
+                "chat_history": self.chat_history
+            })
+
+            # Format source information
+            sources = []
+            for doc in result["source_documents"]:
+                source_file = doc.metadata.get('source', 'Unknown source')
+                if source_file not in sources:
+                    sources.append(source_file)
+
+            # Update chat history
+            self.chat_history.append((question, result["answer"]))
+
+            return {
+                "answer": result["answer"],
+                "sources": sources
+            }
+
+        except Exception as e:
+            return {"error": f"Error processing question: {str(e)}"}
 
 
-def create_streamlit_app():
-    st.title("AI-Powered Document Management System")
+def main():
+    st.set_page_config(page_title="FolderFlow Document Assistant", page_icon="📚")
+
+    st.title("FolderFlow Document Assistant 🤖")
+
+    # Sidebar for folder selection
+    st.sidebar.header("Settings")
+    folder_path = st.sidebar.text_input(
+        "Enter Documents Folder Path",
+        value="/Users/rajat74/Downloads/OneDrive_1_1-6-2025"  # Your default path
+    )
 
     # Initialize session state
-    if 'qa_engine' not in st.session_state:
-        st.session_state.qa_engine = None
+    if 'manager' not in st.session_state:
+        st.session_state.manager = None
+        st.session_state.system_ready = False
 
-    # Folder selection
-    folder_path = st.text_input("Enter folder path containing documents:")
+    # Setup button
+    if st.sidebar.button("Initialize System"):
+        with st.spinner("Setting up the document management system..."):
+            manager = DocumentManager(folder_path)
+            if manager.setup_qa_system():
+                st.session_state.manager = manager
+                st.session_state.system_ready = True
+                st.sidebar.success("System initialized successfully!")
+            else:
+                st.sidebar.error("Failed to initialize the system. Please check the folder path.")
 
-    if st.button("Process Documents"):
-        with st.spinner("Processing documents..."):
-            processor = DocumentProcessor(folder_path)
-            texts = processor.scan_directory()
-            st.session_state.qa_engine = AIQueryEngine(texts)
-            st.success("Documents processed successfully!")
+    # Main chat interface
+    if st.session_state.system_ready:
+        # Display processed files
+        if st.session_state.manager.processed_files:
+            with st.expander("Processed Files"):
+                for file in st.session_state.manager.processed_files:
+                    st.text(f"✓ {os.path.basename(file)}")
 
-            # Save metadata
-            with open('metadata_store.json', 'w') as f:
-                json.dump(processor.metadata_store, f, indent=4, default=str)
+        # Chat interface
+        st.markdown("### Ask me anything about your documents!")
 
-    # Query interface
-    if st.session_state.qa_engine:
-        question = st.text_input("Ask a question about your documents:")
+        # Initialize chat history in session state if it doesn't exist
+        if 'chat_history' not in st.session_state:
+            st.session_state.chat_history = []
 
-        if st.button("Submit"):
-            with st.spinner("Processing query..."):
-                result = st.session_state.qa_engine.query(question)
+        # Display chat history
+        for q, a in st.session_state.chat_history:
+            st.text_area("Question", q, height=50, disabled=True)
+            st.text_area("Answer", a, height=100, disabled=True)
+            st.markdown("---")
 
-                st.write("Answer:", result["answer"])
+        # Question input
+        question = st.text_input("Your question:", key="question_input")
 
-                st.write("Sources:")
-                for source in result["sources"]:
-                    st.write(f"- {source.get('filename', 'Unknown file')}")
+        if st.button("Ask"):
+            if question:
+                with st.spinner("Thinking..."):
+                    response = st.session_state.manager.ask_question(question)
+
+                    if "error" in response:
+                        st.error(response["error"])
+                    else:
+                        # Display answer
+                        st.text_area("Answer", response["answer"], height=150)
+
+                        # Display sources
+                        st.markdown("**Sources:**")
+                        for source in response["sources"]:
+                            st.markdown(f"- {os.path.basename(source)}")
+
+                        # Add to chat history
+                        st.session_state.chat_history.append((question, response["answer"]))
+
+                        # Clear the question input
+                        st.session_state.question_input = ""
+    else:
+        st.info("Please initialize the system using the sidebar controls.")
 
 
 if __name__ == "__main__":
-    create_streamlit_app()
+    main()
